@@ -7,13 +7,14 @@ import warnings
 from django.conf import settings
 
 import haystack
-from haystack.backends import BaseEngine
+from haystack.backends import BaseEngine, log_query
 from haystack.backends.elasticsearch_backend import (
     ElasticsearchSearchBackend,
     ElasticsearchSearchQuery,
 )
 from haystack.constants import DEFAULT_OPERATOR, DJANGO_CT, FUZZINESS
 from haystack.exceptions import MissingDependency
+from haystack.models import SearchResult
 from haystack.utils import get_identifier, get_model_ct
 
 try:
@@ -327,6 +328,51 @@ class Elasticsearch5SearchBackend(ElasticsearchSearchBackend):
             }
         }
 
+
+    @log_query
+    def scan(self, query_string, preserve_order=False, size=None, **kwargs):
+        if len(query_string) == 0:
+            raise ValueError("query_string must not be empty")
+
+        if not self.setup_complete:
+            self.setup()
+
+        search_kwargs = self.build_search_kwargs(query_string, **kwargs)
+
+        order_fields = set()
+        for order in search_kwargs.get("sort", []):
+            for key in order.keys():
+                order_fields.add(key)
+
+        geo_sort = "_geo_distance" in order_fields
+
+        try:
+            for result in scan(
+                self.conn,
+                query=search_kwargs,
+                index=self.index_name,
+                doc_type="modelresult",
+                size=size or 1000,
+                preserve_order=preserve_order,
+            ):
+                yield self._process_results(
+                    {'hits': {'hits': [result,], 'total': 0}},
+                    highlight=kwargs.get("highlight"),
+                    result_class=kwargs.get("result_class", SearchResult),
+                    distance_point=kwargs.get("distance_point"),
+                    geo_sort=geo_sort,
+                )['results'][0]
+        except elasticsearch.TransportError as e:
+            if not self.silently_fail:
+                raise
+
+            self.log.error(
+                "Failed to query Elasticsearch using '%s': %s",
+                query_string,
+                e,
+                exc_info=True,
+            )
+
     def more_like_this(
         self,
         model_instance,
@@ -481,6 +527,15 @@ class Elasticsearch5SearchQuery(ElasticsearchSearchQuery):
         """Adds a regular facet on a field."""
         # to be renamed to the facet fieldname by build_search_kwargs later
         self.facets[field] = options.copy()
+
+    def run_scan(self, preserve_order=False, size=None, **kwargs):
+        final_query = self.build_query()
+        search_kwargs = self.build_params(**kwargs)
+
+        if kwargs:
+            search_kwargs.update(kwargs)
+
+        return self.backend.scan(final_query, preserve_order=preserve_order, size=size, **search_kwargs)
 
 
 class Elasticsearch5SearchEngine(BaseEngine):

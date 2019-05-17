@@ -41,6 +41,9 @@ class SearchQuerySet(object):
         self._ignored_result_count = 0
         self.log = logging.getLogger("haystack")
 
+    def scan(self, preserve_order=False, size=None):
+        return self.query.run_scan(preserve_order=preserve_order, size=size)
+
     def _determine_backend(self):
         # A backend has been manually selected. Use it instead.
         if self._using is not None:
